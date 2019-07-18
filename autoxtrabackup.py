@@ -14,15 +14,17 @@ import humanfriendly
 import logging
 import logging.handlers
 from logging.handlers import RotatingFileHandler
-
+from general_conf import path_config
 
 logger = logging.getLogger('')
 
 
 destinations_hash = {'linux':'/dev/log', 'linux2': '/dev/log', 'darwin':'/var/run/syslog'}
 
+
 def address_matcher(plt):
     return destinations_hash.get(plt, ('localhost', 514))
+
 
 handler = logging.handlers.SysLogHandler(address=address_matcher(_platform))
 
@@ -45,7 +47,7 @@ def print_version(ctx, param, value):
     click.echo("Email: rzayev.shahriyar@yandex.com")
     click.echo(
         "Based on Percona XtraBackup: https://github.com/percona/percona-xtrabackup/")
-    click.echo('MySQL-AutoXtraBackup Version: 1.5.1')
+    click.echo('MySQL-AutoXtraBackup Version: 1.5.4')
     ctx.exit()
 
 
@@ -54,7 +56,7 @@ def check_file_content(file):
     with open(file, 'r') as config_file:
         file_content = config_file.read()
  
-    config_headers = ["MySQL", "Backup", "Encrypt", "Compress", "Commands", "TestConf"]
+    config_headers = ["MySQL", "Backup", "Encrypt", "Compress", "Commands"]
     config_keys = [
         "mysql",
         "mycnf",
@@ -63,8 +65,8 @@ def check_file_content(file):
         "mysql_password",
         "mysql_host",
         "datadir",
-        "tmpdir",
-        "backupdir",
+        "tmp_dir",
+        "backup_dir",
         "backup_tool",
         "xtra_prepare",
         "start_mysql_command",
@@ -93,20 +95,20 @@ def validate_file(file):
     """
     if os.path.isfile(file):
         # filename extension should be .conf
-        pattern = re.compile(r'.*\.conf')
+        pattern = re.compile(r'.*\.cnf')
 
         if pattern.match(file):
             # Lastly the file should have all 5 required headers
             if check_file_content(file):
                 return
         else:
-            raise ValueError("Invalid file extension. Expecting .conf")
+            raise ValueError("Invalid file extension. Expecting .cnf")
     else:
         raise FileNotFoundError("Specified file does not exist.")
 
 
 @click.command()
-@click.option('--dry_run', is_flag=True, help="Enable the dry run.")
+@click.option('--dry-run', is_flag=True, help="Enable the dry run.")
 @click.option('--prepare', is_flag=True, help="Prepare/recover backups.")
 @click.option('--backup',
               is_flag=True,
@@ -120,25 +122,26 @@ def validate_file(file):
               expose_value=False,
               is_eager=True,
               help="Version information.")
-@click.option('--defaults_file',
-              default='/etc/bck.conf',
+@click.option('--defaults-file',
+              default=path_config.config_path_file,
               show_default=True,
               help="Read options from the given file")
 @click.option('--tag',
               help="Pass the tag string for each backup")
-@click.option('--show_tags',
+@click.option('--show-tags',
               is_flag=True,
               help="Show backup tags and exit")
 @click.option('-v', '--verbose', is_flag=True,
               help="Be verbose (print to console)")
 @click.option('-lf',
-              '--log_file',
-              default='/var/log/autoxtrabackup.log',
+              '--log-file',
+              default=path_config.log_file_path,
               show_default=True,
               help="Set log file")
 @click.option('-l',
               '--log',
-              default='WARNING',
+              '--log-level',
+              default='DEBUG',
               show_default=True,
               type=click.Choice(['DEBUG',
                                  'INFO',
@@ -146,9 +149,28 @@ def validate_file(file):
                                  'ERROR',
                                  'CRITICAL']),
               help="Set log level")
-@click.option('--test_mode',
+@click.option('--log-file-max-bytes',
+              default=1073741824,
+              show_default=True,
+              nargs=1,
+              type=int,
+              help="Set log file max size in bytes")
+@click.option('--log-file-backup-count',
+              default=7,
+              show_default=True,
+              nargs=1,
+              type=int,
+              help="Set log file backup count")
+@click.option('--keyring-vault',
+              default=0,
+              show_default=True,
+              nargs=1,
+              type=int,
+              help="Enable this when you pass keyring_vault options in default mysqld options in config"
+                   "[Only for using with --test-mode]")
+@click.option('--test-mode',
               is_flag=True,
-              help="Enable test mode.Must be used with --defaults_file and only for TESTs for XtraBackup")
+              help="Enable test mode. Must be used with --defaults-file and only for TESTs for XtraBackup")
 @click.option('--help',
               is_flag=True,
               callback=print_help,
@@ -157,8 +179,14 @@ def validate_file(file):
               help="Print help message and exit.")
 @click.pass_context
 def all_procedure(ctx, prepare, backup, partial, tag, show_tags,
-                  verbose, log_file, log, defaults_file, dry_run, test_mode):
-    logger.setLevel(log)
+                  verbose, log_file, log, defaults_file,
+                  dry_run, test_mode, log_file_max_bytes,
+                  log_file_backup_count, keyring_vault):
+    config = GeneralClass(defaults_file)
+    if config.log_level:
+        logger.setLevel(config.log_level)
+    else:
+        logger.setLevel(log)
     formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-8s %(message)s',
                                   datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -169,15 +197,19 @@ def all_procedure(ctx, prepare, backup, partial, tag, show_tags,
 
     if log_file:
         try:
-            file_handler = RotatingFileHandler(log_file, mode='a', maxBytes=104857600, backupCount=7)
+            if config.log_file_max_bytes and config.log_file_backup_count:
+                file_handler = RotatingFileHandler(log_file, mode='a',
+                                                   maxBytes=int(config.log_file_max_bytes),
+                                                   backupCount=int(config.log_file_backup_count))
+            else:
+                file_handler = RotatingFileHandler(log_file, mode='a',
+                                                   maxBytes=log_file_max_bytes, backupCount=log_file_backup_count)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
         except PermissionError as err:
             exit("{} Please consider to run as root or sudo".format(err))
 
     validate_file(defaults_file)
-    config = GeneralClass(defaults_file)
-
     pid_file = pid.PidFile(piddir=config.pid_dir)
 
     try:
@@ -194,13 +226,20 @@ def all_procedure(ctx, prepare, backup, partial, tag, show_tags,
                 b = Backup(config=defaults_file)
                 b.show_tags(backup_dir=b.backupdir)
             elif test_mode and defaults_file:
-                # TODO: do staff here to implement all in one things for running test mode
                 logger.warning("Enabled Test Mode!!!")
                 logger.debug("Starting Test Mode")
                 test_obj = RunnerTestMode(config=defaults_file)
                 for basedir in test_obj.basedirs:
                     if ('5.7' in basedir) and ('2_4_ps_5_7' in defaults_file):
-                        test_obj.wipe_backup_prepare_copyback(basedir=basedir)
+                        if keyring_vault == 1:
+                            test_obj.wipe_backup_prepare_copyback(basedir=basedir, keyring_vault=1)
+                        else:
+                            test_obj.wipe_backup_prepare_copyback(basedir=basedir)
+                    elif ('8.0' in basedir) and ('8_0_ps_8_0' in defaults_file):
+                        if keyring_vault == 1:
+                            test_obj.wipe_backup_prepare_copyback(basedir=basedir, keyring_vault=1)
+                        else:
+                            test_obj.wipe_backup_prepare_copyback(basedir=basedir)
                     elif ('5.6' in basedir) and ('2_4_ps_5_6' in defaults_file):
                         test_obj.wipe_backup_prepare_copyback(basedir=basedir)
                     elif ('5.6' in basedir) and ('2_3_ps_5_6' in defaults_file):
